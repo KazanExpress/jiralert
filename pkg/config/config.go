@@ -145,6 +145,7 @@ type ReceiverConfig struct {
 	WontFixResolution string                 `yaml:"wont_fix_resolution" json:"wont_fix_resolution"`
 	Fields            map[string]interface{} `yaml:"fields" json:"fields"`
 	Components        []string               `yaml:"components" json:"components"`
+	StaticLabels      []string               `yaml:"static_labels" json:"static_labels"`
 
 	// ExcludeKeys settings
 	ExcludeKeys []string `yaml:"exclude_keys" json:"exclude_keys"`
@@ -325,6 +326,9 @@ func (c *Config) UnmarshalYAML(unmarshal func(interface{}) error) error {
 					rc.Fields[key] = value
 				}
 			}
+		}
+		if len(c.Defaults.StaticLabels) > 0 {
+			rc.StaticLabels = append(rc.StaticLabels, c.Defaults.StaticLabels...)
 		}
 	}
 
