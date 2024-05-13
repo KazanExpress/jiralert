@@ -17,12 +17,12 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"github.com/andygrunwald/go-jira"
 	"net/http"
 	"os"
 	"runtime"
 	"strconv"
 
+	"github.com/andygrunwald/go-jira"
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
 	"github.com/prometheus-community/jiralert/pkg/alertmanager"
@@ -36,9 +36,10 @@ import (
 )
 
 const (
-	unknownReceiver = "<unknown>"
-	logFormatLogfmt = "logfmt"
-	logFormatJSON   = "json"
+	unknownReceiver             = "<unknown>"
+	logFormatLogfmt             = "logfmt"
+	logFormatJSON               = "json"
+	defaultMaxDescriptionLength = 32767 // https://jira.atlassian.com/browse/JRASERVER-64351
 )
 
 var (
@@ -48,6 +49,10 @@ var (
 	logFormat     = flag.String("log.format", logFormatLogfmt, "Log format to use ("+logFormatLogfmt+", "+logFormatJSON+")")
 	hashJiraLabel = flag.Bool("hash-jira-label", false, "if enabled: renames ALERT{...} to JIRALERT{...}; also hashes the key-value pairs inside of JIRALERT{...} in the created jira issue labels"+
 		"- this ensures that the label text does not overflow the allowed length in jira (255)")
+	updateSummary        = flag.Bool("update-summary", true, "When false, jiralert does not update the summary of the existing jira issue, even when changes are spotted.")
+	updateDescription    = flag.Bool("update-description", true, "When false, jiralert does not update the description of the existing jira issue, even when changes are spotted.")
+	reopenTickets        = flag.Bool("reopen-tickets", true, "When false, jiralert does not reopen tickets.")
+	maxDescriptionLength = flag.Int("max-description-length", defaultMaxDescriptionLength, "Maximum length of Descriptions. Truncate to this size avoid server errors.")
 
 	// Version is the build version, set by make to latest git tag/hash via `-ldflags "-X main.Version=$(VERSION)"`.
 	Version = "<local build>"
@@ -121,13 +126,14 @@ func main() {
 			return
 		}
 
-		if retry, err := notify.NewReceiver(logger, conf, tmpl, client.Issue).Notify(&data, *hashJiraLabel); err != nil {
+		if retry, err := notify.NewReceiver(logger, conf, tmpl, client.Issue).Notify(&data, *hashJiraLabel, *updateSummary, *updateDescription, *reopenTickets, *maxDescriptionLength); err != nil {
 			var status int
 			if retry {
 				// Instruct Alertmanager to retry.
 				status = http.StatusServiceUnavailable
 			} else {
-				status = http.StatusInternalServerError
+				// Inaccurate, just letting Alertmanager know that it should not retry.
+				status = http.StatusBadRequest
 			}
 			errorHandler(w, status, err, conf.Name, &data, logger)
 			return

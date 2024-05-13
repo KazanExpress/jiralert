@@ -17,12 +17,12 @@ import (
 	"bytes"
 	"crypto/sha512"
 	"fmt"
-	"github.com/andygrunwald/go-jira"
 	"io"
 	"reflect"
 	"strings"
 	"time"
 
+	"github.com/andygrunwald/go-jira"
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
 	"github.com/pkg/errors"
@@ -40,6 +40,7 @@ type jiraIssueService interface {
 
 	Create(issue *jira.Issue) (*jira.Issue, *jira.Response, error)
 	UpdateWithOptions(issue *jira.Issue, opts *jira.UpdateQueryOptions) (*jira.Issue, *jira.Response, error)
+	AddComment(issueID string, comment *jira.Comment) (*jira.Comment, *jira.Response, error)
 	DoTransition(ticketID, transitionID string) (*jira.Response, error)
 }
 
@@ -60,7 +61,7 @@ func NewReceiver(logger log.Logger, c *config.ReceiverConfig, t *template.Templa
 }
 
 // Notify manages JIRA issues based on alertmanager webhook notify message.
-func (r *Receiver) Notify(data *alertmanager.Data, hashJiraLabel bool) (bool, error) {
+func (r *Receiver) Notify(data *alertmanager.Data, hashJiraLabel bool, updateSummary bool, updateDescription bool, reopenTickets bool, maxDescriptionLength int) (bool, error) {
 	project, err := r.tmpl.Execute(r.conf.Project, data)
 	if err != nil {
 		return false, errors.Wrap(err, "generate project from template")
@@ -86,19 +87,52 @@ func (r *Receiver) Notify(data *alertmanager.Data, hashJiraLabel bool) (bool, er
 		return false, errors.Wrap(err, "render issue description")
 	}
 
+	if len(issueDesc) > maxDescriptionLength {
+		level.Warn(r.logger).Log("msg", "truncating description", "original", len(issueDesc), "limit", maxDescriptionLength)
+		issueDesc = issueDesc[:maxDescriptionLength]
+	}
+
 	if issue != nil {
+
 		// Update summary if needed.
-		if issue.Fields.Summary != issueSummary {
-			retry, err := r.updateSummary(issue.Key, issueSummary)
-			if err != nil {
-				return retry, err
+		if updateSummary {
+			if issue.Fields.Summary != issueSummary {
+				level.Debug(r.logger).Log("updateSummaryDisabled executing")
+				retry, err := r.updateSummary(issue.Key, issueSummary)
+				if err != nil {
+					return retry, err
+				}
 			}
 		}
 
-		if issue.Fields.Description != issueDesc {
-			retry, err := r.updateDescription(issue.Key, issueDesc)
-			if err != nil {
-				return retry, err
+		if r.conf.UpdateInComment != nil && *r.conf.UpdateInComment {
+			numComments := 0
+			if issue.Fields.Comments != nil {
+				numComments = len(issue.Fields.Comments.Comments)
+			}
+			if numComments > 0 && issue.Fields.Comments.Comments[(numComments-1)].Body == issueDesc {
+				// if the new comment is identical to the most recent comment,
+				// this is probably due to the prometheus repeat_interval and should not be added.
+				level.Debug(r.logger).Log("msg", "not adding new comment identical to last", "key", issue.Key)
+			} else if numComments == 0 && issue.Fields.Description == issueDesc {
+				// if the first comment is identical to the description,
+				// this is probably due to the prometheus repeat_interval and should not be added.
+				level.Debug(r.logger).Log("msg", "not adding comment identical to description", "key", issue.Key)
+			} else {
+				retry, err := r.addComment(issue.Key, issueDesc)
+				if err != nil {
+					return retry, err
+				}
+			}
+		}
+
+		// update description if enabled. This has to be done after comment adding logic which needs to handle redundant commentary vs description case.
+		if updateDescription {
+			if issue.Fields.Description != issueDesc {
+				retry, err := r.updateDescription(issue.Key, issueDesc)
+				if err != nil {
+					return retry, err
+				}
 			}
 		}
 
@@ -122,14 +156,19 @@ func (r *Receiver) Notify(data *alertmanager.Data, hashJiraLabel bool) (bool, er
 			return false, nil
 		}
 
-		if r.conf.WontFixResolution != "" && issue.Fields.Resolution != nil &&
-			issue.Fields.Resolution.Name == r.conf.WontFixResolution {
-			level.Info(r.logger).Log("msg", "issue was resolved as won't fix, not reopening", "key", issue.Key, "label", issueGroupLabel, "resolution", issue.Fields.Resolution.Name)
-			return false, nil
+		if reopenTickets {
+			if r.conf.WontFixResolution != "" && issue.Fields.Resolution != nil &&
+				issue.Fields.Resolution.Name == r.conf.WontFixResolution {
+				level.Info(r.logger).Log("msg", "issue was resolved as won't fix, not reopening", "key", issue.Key, "label", issueGroupLabel, "resolution", issue.Fields.Resolution.Name)
+				return false, nil
+			}
+
+			level.Info(r.logger).Log("msg", "issue was recently resolved, reopening", "key", issue.Key, "label", issueGroupLabel)
+			return r.reopen(issue.Key)
 		}
 
-		level.Info(r.logger).Log("msg", "issue was recently resolved, reopening", "key", issue.Key, "label", issueGroupLabel)
-		return r.reopen(issue.Key)
+		level.Debug(r.logger).Log("Did not update anything")
+		return false, nil
 	}
 
 	if len(data.Alerts.Firing()) == 0 {
@@ -144,13 +183,15 @@ func (r *Receiver) Notify(data *alertmanager.Data, hashJiraLabel bool) (bool, er
 		return false, errors.Wrap(err, "render issue type")
 	}
 
+	staticLabels := r.conf.StaticLabels
+
 	issue = &jira.Issue{
 		Fields: &jira.IssueFields{
 			Project:     jira.Project{Key: project},
 			Type:        jira.IssueType{Name: issueType},
 			Description: issueDesc,
 			Summary:     issueSummary,
-			Labels:      []string{issueGroupLabel},
+			Labels:      append(staticLabels, issueGroupLabel),
 			Unknowns:    tcontainer.NewMarshalMap(),
 		},
 	}
@@ -175,9 +216,9 @@ func (r *Receiver) Notify(data *alertmanager.Data, hashJiraLabel bool) (bool, er
 		}
 	}
 
-	if r.conf.AddGroupLabels {
+	if r.conf.AddGroupLabels != nil && *r.conf.AddGroupLabels {
 		for k, v := range data.GroupLabels {
-			issue.Fields.Labels = append(issue.Fields.Labels, fmt.Sprintf("%s=%q", k, v))
+			issue.Fields.Labels = append(issue.Fields.Labels, fmt.Sprintf("%s=%.200q", k, v))
 		}
 	}
 
@@ -271,10 +312,12 @@ func toGroupTicketLabel(groupLabels alertmanager.KV, hashJiraLabel bool, exclude
 	return strings.Replace(buf.String(), " ", "", -1)
 }
 
-func (r *Receiver) search(project, issueLabel string) (*jira.Issue, bool, error) {
-	query := fmt.Sprintf("project=\"%s\" and labels=%q order by resolutiondate desc", project, issueLabel)
+func (r *Receiver) search(projects []string, issueLabel string) (*jira.Issue, bool, error) {
+	// Search multiple projects in case issue was moved and further alert firings are desired in existing JIRA.
+	projectList := "'" + strings.Join(projects, "', '") + "'"
+	query := fmt.Sprintf("project in(%s) and labels=%q order by resolutiondate desc", projectList, issueLabel)
 	options := &jira.SearchOptions{
-		Fields:     []string{"summary", "status", "resolution", "resolutiondate"},
+		Fields:     []string{"summary", "status", "resolution", "resolutiondate", "description", "comment"},
 		MaxResults: 2,
 	}
 
@@ -300,7 +343,15 @@ func (r *Receiver) search(project, issueLabel string) (*jira.Issue, bool, error)
 }
 
 func (r *Receiver) findIssueToReuse(project string, issueGroupLabel string) (*jira.Issue, bool, error) {
-	issue, retry, err := r.search(project, issueGroupLabel)
+	projectsToSearch := []string{project}
+	// In case issue was moved to a different project, include the other configured projects in search (if any).
+	for _, other := range r.conf.OtherProjects {
+		if other != project {
+			projectsToSearch = append(projectsToSearch, other)
+		}
+	}
+
+	issue, retry, err := r.search(projectsToSearch, issueGroupLabel)
 	if err != nil {
 		return nil, retry, err
 	}
@@ -353,6 +404,21 @@ func (r *Receiver) updateDescription(issueKey string, description string) (bool,
 	return false, nil
 }
 
+func (r *Receiver) addComment(issueKey string, content string) (bool, error) {
+	level.Debug(r.logger).Log("msg", "adding comment to existing issue", "key", issueKey, "content", content)
+
+	commentDetails := &jira.Comment{
+		Body: content,
+	}
+
+	comment, resp, err := r.client.AddComment(issueKey, commentDetails)
+	if err != nil {
+		return handleJiraErrResponse("Issue.AddComment", resp, err, r.logger)
+	}
+	level.Debug(r.logger).Log("msg", "added comment to issue", "key", issueKey, "id", comment.ID)
+	return false, nil
+}
+
 func (r *Receiver) reopen(issueKey string) (bool, error) {
 	return r.doTransition(issueKey, r.conf.ReopenState)
 }
@@ -377,10 +443,11 @@ func handleJiraErrResponse(api string, resp *jira.Response, err error, logger lo
 	}
 
 	if resp != nil && resp.StatusCode/100 != 2 {
-		retry := resp.StatusCode == 500 || resp.StatusCode == 503
+		retry := resp.StatusCode == 500 || resp.StatusCode == 503 || resp.StatusCode == 429
+		// Sometimes go-jira consumes the body (e.g. in `Search`) and includes it in the error message;
+		// sometimes (e.g. in `Create`) it doesn't. Include both the error and the body, just in case.
 		body, _ := io.ReadAll(resp.Body)
-		// go-jira error message is not particularly helpful, replace it
-		return retry, errors.Errorf("JIRA request %s returned status %s, body %q", resp.Request.URL, resp.Status, string(body))
+		return retry, errors.Errorf("JIRA request %s returned status %s, error %q, body %q", resp.Request.URL, resp.Status, err, body)
 	}
 	return false, errors.Wrapf(err, "JIRA request %s failed", api)
 }
@@ -407,6 +474,6 @@ func (r *Receiver) doTransition(issueKey string, transitionState string) (bool, 
 			return false, nil
 		}
 	}
-	return false, errors.Errorf("JIRA state %q does not exist or no transition possible for %s", r.conf.ReopenState, issueKey)
+	return false, errors.Errorf("JIRA state %q does not exist or no transition possible for %s", transitionState, issueKey)
 
 }

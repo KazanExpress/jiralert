@@ -133,6 +133,7 @@ type ReceiverConfig struct {
 
 	// Required issue fields
 	Project        string    `yaml:"project" json:"project"`
+	OtherProjects  []string  `yaml:"other_projects" json:"other_projects"`
 	IssueType      string    `yaml:"issue_type" json:"issue_type"`
 	Summary        string    `yaml:"summary" json:"summary"`
 	ReopenState    string    `yaml:"reopen_state" json:"reopen_state"`
@@ -144,12 +145,16 @@ type ReceiverConfig struct {
 	WontFixResolution string                 `yaml:"wont_fix_resolution" json:"wont_fix_resolution"`
 	Fields            map[string]interface{} `yaml:"fields" json:"fields"`
 	Components        []string               `yaml:"components" json:"components"`
+	StaticLabels      []string               `yaml:"static_labels" json:"static_labels"`
 
 	// ExcludeKeys settings
 	ExcludeKeys []string `yaml:"exclude_keys" json:"exclude_keys"`
 
 	// Label copy settings
-	AddGroupLabels bool `yaml:"add_group_labels" json:"add_group_labels"`
+	AddGroupLabels *bool `yaml:"add_group_labels" json:"add_group_labels"`
+
+	// Flag to enable updates in comments.
+	UpdateInComment *bool `yaml:"update_in_comment" json:"update_in_comment"`
 
 	// Flag to auto-resolve opened issue when the alert is resolved.
 	AutoResolve *AutoResolve `yaml:"auto_resolve" json:"auto_resolve"`
@@ -314,6 +319,18 @@ func (c *Config) UnmarshalYAML(unmarshal func(interface{}) error) error {
 					rc.Fields[key] = value
 				}
 			}
+		}
+		if len(c.Defaults.StaticLabels) > 0 {
+			rc.StaticLabels = append(rc.StaticLabels, c.Defaults.StaticLabels...)
+		}
+		if len(c.Defaults.OtherProjects) > 0 {
+			rc.OtherProjects = append(rc.OtherProjects, c.Defaults.OtherProjects...)
+		}
+		if rc.AddGroupLabels == nil {
+			rc.AddGroupLabels = c.Defaults.AddGroupLabels
+		}
+		if rc.UpdateInComment == nil {
+			rc.UpdateInComment = c.Defaults.UpdateInComment
 		}
 	}
 
