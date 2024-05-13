@@ -17,12 +17,11 @@ import (
 	"bytes"
 	"crypto/sha512"
 	"fmt"
+	"github.com/andygrunwald/go-jira"
 	"io"
 	"reflect"
 	"strings"
 	"time"
-
-	"github.com/andygrunwald/go-jira"
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
@@ -129,12 +128,8 @@ func (r *Receiver) Notify(data *alertmanager.Data, hashJiraLabel bool) (bool, er
 			return false, nil
 		}
 
-		if r.conf.ReopenEnabled != nil && !*r.conf.ReopenEnabled {
-			level.Debug(r.logger).Log("msg", "reopening disabled, skipping search for existing issue")
-		} else {
-			level.Info(r.logger).Log("msg", "issue was recently resolved, reopening", "key", issue.Key, "label", issueGroupLabel)
-			return r.reopen(issue.Key)
-		}
+		level.Info(r.logger).Log("msg", "issue was recently resolved, reopening", "key", issue.Key, "label", issueGroupLabel)
+		return r.reopen(issue.Key)
 	}
 
 	if len(data.Alerts.Firing()) == 0 {
@@ -305,7 +300,6 @@ func (r *Receiver) search(project, issueLabel string) (*jira.Issue, bool, error)
 }
 
 func (r *Receiver) findIssueToReuse(project string, issueGroupLabel string) (*jira.Issue, bool, error) {
-
 	issue, retry, err := r.search(project, issueGroupLabel)
 	if err != nil {
 		return nil, retry, err
