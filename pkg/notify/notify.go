@@ -163,8 +163,12 @@ func (r *Receiver) Notify(data *alertmanager.Data, hashJiraLabel bool, updateSum
 				return false, nil
 			}
 
-			level.Info(r.logger).Log("msg", "issue was recently resolved, reopening", "key", issue.Key, "label", issueGroupLabel)
-			return r.reopen(issue.Key)
+			if r.conf.ReopenEnabled != nil && !*r.conf.ReopenEnabled {
+				level.Debug(r.logger).Log("msg", "reopening disabled, skipping search for existing issue")
+			} else {
+				level.Info(r.logger).Log("msg", "issue was recently resolved, reopening", "key", issue.Key, "label", issueGroupLabel)
+				return r.reopen(issue.Key)
+			}
 		}
 
 		level.Debug(r.logger).Log("Did not update anything")
