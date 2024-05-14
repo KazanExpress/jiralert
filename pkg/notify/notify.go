@@ -170,9 +170,6 @@ func (r *Receiver) Notify(data *alertmanager.Data, hashJiraLabel bool, updateSum
 				return r.reopen(issue.Key)
 			}
 		}
-
-		level.Debug(r.logger).Log("Did not update anything")
-		return false, nil
 	}
 
 	if len(data.Alerts.Firing()) == 0 {
