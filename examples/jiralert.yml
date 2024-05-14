@@ -8,7 +8,7 @@ defaults:
   # Alternatively to user and password use a Personal Access Token
   # personal_access_token: "Your Personal Access Token". See https://confluence.atlassian.com/enterprise/using-personal-access-tokens-1026032365.html
 
-  # Exclude labels in JIRA issue. 
+  # Exclude labels in JIRA issue.
   exclude_keys: []
 
   # The type of JIRA issue to create. Required.
@@ -19,6 +19,8 @@ defaults:
   summary: '{{ template "jira.summary" . }}'
   # Go template invocation for generating the description. Optional.
   description: '{{ template "jira.description" . }}'
+  # Enables reopening existing issues. Optional. Default is true.
+  reopen_enabled: true
   # State to transition into when reopening a closed issue. Required.
   reopen_state: "To Do"
   # Do not reopen issues with this resolution. Optional.
